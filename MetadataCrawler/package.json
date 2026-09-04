@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "dependencies": {
+    "frida-java-bridge": "7.0.4"
+  }
+}

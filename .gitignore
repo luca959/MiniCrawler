@@ -1,0 +1,10 @@
+.venv-frida/
+.cache/
+__pycache__/
+*.py[cod]
+MetadataCrawler/captures/
+MetadataCrawler/data.db
+MetadataCrawler/*.log
+MetadataCrawler/*req*.txt
+MetadataCrawler/node_modules/
+MetadataCrawler/frida_capture.bundle.js
