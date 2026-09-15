@@ -31,6 +31,30 @@ def clean_text(value: Any) -> str:
     return html.unescape(TAG_RE.sub("", str(value))).strip()
 
 
+def first_nonempty(*values: Any) -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = clean_text(value) if not isinstance(value, (dict, list)) else json.dumps(value, ensure_ascii=False)
+        if text:
+            return text
+    return ""
+
+
+def nested_first(mapping: dict[str, Any], *paths: str) -> str:
+    for path in paths:
+        current: Any = mapping
+        for part in path.split("."):
+            if not isinstance(current, dict):
+                current = None
+                break
+            current = current.get(part)
+        value = first_nonempty(current)
+        if value:
+            return value
+    return ""
+
+
 def adb(*args: str) -> str:
     result = subprocess.run(
         ["adb", *args], check=True, text=True, capture_output=True
@@ -158,10 +182,21 @@ def item_record(item: dict[str, Any], source_query: str) -> dict[str, str]:
     if isinstance(source, dict):
         source = source.get("title") or source.get("name") or ""
     appid = str(jump.get("appID") or item.get("appID") or "").strip()
+    rating = first_nonempty(
+        item.get("rating"), item.get("score"), item.get("scoreQuailty"), item.get("scoreQuality"),
+        item.get("star"), item.get("rate"), nested_first(jump, "rating", "score", "scoreQuality"),
+    )
+    url = first_nonempty(
+        item.get("url"), item.get("path"), item.get("pagePath"), item.get("appPath"),
+        nested_first(jump, "url", "path", "pagePath", "appPath"),
+    )
     return {
         "appid": appid,
         "doc_id": str(item.get("docID") or ""),
         "name": clean_text(item.get("title")),
+        "category": first_nonempty(item.get("category"), item.get("categoryName"), item.get("typeName")),
+        "rating": rating,
+        "url": url,
         "description": clean_text(item.get("desc")),
         "icon_url": str(item.get("imgUrl") or item.get("iconUrl") or ""),
         "username": str(jump.get("userName") or ""),
@@ -169,6 +204,7 @@ def item_record(item: dict[str, Any], source_query: str) -> dict[str, str]:
         "app_version": str(jump.get("appVersion") or item.get("appVersion") or ""),
         "source_query": source_query,
         "verified_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "raw_json": json.dumps(item, ensure_ascii=False, separators=(",", ":")),
     }
 
 
@@ -181,16 +217,24 @@ def connect_db(path: Path) -> sqlite3.Connection:
             appid TEXT PRIMARY KEY,
             doc_id TEXT,
             name TEXT NOT NULL,
+            category TEXT,
+            rating TEXT,
+            url TEXT,
             description TEXT,
             icon_url TEXT,
             username TEXT,
             developer TEXT,
             app_version TEXT,
             source_query TEXT,
-            verified_at TEXT NOT NULL
+            verified_at TEXT NOT NULL,
+            raw_json TEXT
         )
         """
     )
+    existing = {row[1] for row in connection.execute("PRAGMA table_info(miniapps)").fetchall()}
+    for column in ["category", "rating", "url", "raw_json"]:
+        if column not in existing:
+            connection.execute(f"ALTER TABLE miniapps ADD COLUMN {column} TEXT")
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS searches (
@@ -220,21 +264,25 @@ def save_records(
         connection.execute(
             """
             INSERT INTO miniapps (
-                appid, doc_id, name, description, icon_url, username,
-                developer, app_version, source_query, verified_at
+                appid, doc_id, name, category, rating, url, description, icon_url, username,
+                developer, app_version, source_query, verified_at, raw_json
             ) VALUES (
-                :appid, :doc_id, :name, :description, :icon_url, :username,
-                :developer, :app_version, :source_query, :verified_at
+                :appid, :doc_id, :name, :category, :rating, :url, :description, :icon_url, :username,
+                :developer, :app_version, :source_query, :verified_at, :raw_json
             )
             ON CONFLICT(appid) DO UPDATE SET
                 doc_id=excluded.doc_id,
                 name=excluded.name,
+                category=COALESCE(NULLIF(excluded.category, ''), miniapps.category),
+                rating=COALESCE(NULLIF(excluded.rating, ''), miniapps.rating),
+                url=COALESCE(NULLIF(excluded.url, ''), miniapps.url),
                 description=excluded.description,
                 icon_url=excluded.icon_url,
                 username=excluded.username,
                 developer=excluded.developer,
                 app_version=excluded.app_version,
-                verified_at=excluded.verified_at
+                verified_at=excluded.verified_at,
+                raw_json=COALESCE(NULLIF(excluded.raw_json, ''), miniapps.raw_json)
             """,
             record,
         )
@@ -257,8 +305,8 @@ def export_csv(
     limit: int | None = None,
 ) -> int:
     sql = """
-        SELECT appid, doc_id, name, description, icon_url, username,
-               developer, app_version, source_query, verified_at
+        SELECT appid, doc_id, name, category, rating, url, description, icon_url, username,
+               developer, app_version, source_query, verified_at, raw_json
         FROM miniapps ORDER BY name COLLATE NOCASE, appid
         """
     parameters: tuple[int, ...] = ()
@@ -271,14 +319,14 @@ def export_csv(
         writer = csv.writer(handle)
         writer.writerow(["id", "name", "category", "rating", "url", "description"])
         for row in rows:
-            appid, _, name, description, *_ = row
-            writer.writerow([appid, name, "Mini Program", "", "", description])
+            appid, _, name, category, rating, url, description, *_ = row
+            writer.writerow([appid, name, category or "Mini Program", rating, url, description])
     with detailed.open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.writer(handle)
         writer.writerow(
             [
-                "appid", "doc_id", "name", "description", "icon_url",
-                "username", "developer", "app_version", "source_query", "verified_at",
+                "appid", "doc_id", "name", "category", "rating", "url", "description", "icon_url",
+                "username", "developer", "app_version", "source_query", "verified_at", "raw_json",
             ]
         )
         writer.writerows(rows)
